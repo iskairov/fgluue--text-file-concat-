@@ -1,10 +1,8 @@
 """
-FGlue: простое GUI-приложение для объединения файлов по шаблонам.
-
-Основные компоненты:
-- FileContext: собирает метаданные файла и подставляет их в шаблон
-- FGlueApp: GUI (tkinter) для выбора файлов/папок, шаблонов и объединения
+FGlue v2.0: простое GUI-приложение для объединения файлов по шаблонам.
+by @iskairov
 """
+
 import hashlib
 import os
 import sys
@@ -17,41 +15,31 @@ import subprocess
 
 
 class FileContext:
-    """
-    Собирает метаданные и умеет подставлять их в шаблон.
+    """ Класс для работы с файлами: собирает метаданные файла, ведет счетчики и позволяет подставлять их в шаблоны. """
 
-    Поддерживаемые плейсхолдеры:
-    - {name}, {extension}, {filename}, {path}, {folder}, {drive}, {size}
-    - {content}, {lines}, {words}, {chars}, {firstline}, {lastline}
-    - {counter} — порядковый номер файла во время прохода
-    - {total_files}, {total_lines}, {total_words} — суммарные показатели по всем обработанным файлам
-    - {line:N} — N-я строка, {head:N} — первые N строк, {tail:N} — последние N строк
-    и др.
-    """
+    files_counter = 0
 
-    counter_global = 0
+    # Счетчики для текущей сессии
+    current_files_count = 0
+    current_lines_count = 0
+    current_words_count = 0
+    current_chars_count = 0
+
+    # Суммарные счетчики по всем файлам
     total_files = 0
     total_lines = 0
     total_words = 0
-    # Итоговые показатели по всем файлам текущей операции объединения
-    grand_total_files = 0
-    grand_total_lines = 0
-    grand_total_words = 0
+    total_chars = 0
 
     def __init__(self, path: str) -> None:
-        """ Читает файл и подготавливает поля для подстановки в шаблон. """
+        """
+        Инициализация объекта FileContext.
+        Считывает содержимое файла, подсчитывает строки, слова и символы, обновляет счетчики.
+
+        :param path: Путь к файлу.
+        """
 
         self.path = path
-        self.folder, self.filename = os.path.split(path)
-        self.name, self.extension = os.path.splitext(self.filename)
-        self.extension = self.extension.lstrip(".")
-        self.drive = os.path.splitdrive(path)[0] or ""
-        self.size = os.path.getsize(path)
-
-        stat = os.stat(path)
-        self.created = datetime.fromtimestamp(stat.st_ctime)
-        self.modified = datetime.fromtimestamp(stat.st_mtime)
-        self.accessed = datetime.fromtimestamp(stat.st_atime)
 
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -59,213 +47,209 @@ class FileContext:
         except Exception:
             self.content = ""
 
-        self.lines_list = self.content.splitlines()
-        self.lines = len(self.lines_list)
-        self.words = len(self.content.split())
-        self.chars = len(self.content)
+        self.lines = self.content.splitlines()
 
-        self.firstline = self.lines_list[0] if self.lines > 0 else ""
-        self.lastline = self.lines_list[-1] if self.lines > 0 else ""
+        self.lines_count = len(self.lines)
+        self.words_count = len(self.content.split())
+        self.chars_count = len(self.content)
 
-        FileContext.counter_global += 1
-        self.counter = FileContext.counter_global
+        FileContext.files_counter += 1
 
-        FileContext.total_files += 1
-        FileContext.total_lines += self.lines
-        FileContext.total_words += self.words
+        FileContext.current_files_count += 1
+        FileContext.current_lines_count += self.lines_count
+        FileContext.current_words_count += self.words_count
+        FileContext.current_chars_count += self.chars_count
 
-        self.hash_md5 = self._calc_hash("md5")
-        self.hash_sha1 = self._calc_hash("sha1")
+    @staticmethod
+    def reset_counters():
+        """
+        Сбрасывает все счетчики файлов, строк, слов и символов как для текущей сессии, так и суммарные.
+        Используется для начала новой серии операций с файлами.
+        """
+
+        FileContext.files_counter = 0
+
+        FileContext.current_files_count = 0
+        FileContext.current_lines_count = 0
+        FileContext.current_words_count = 0
+        FileContext.current_chars_count = 0
+
+        FileContext.total_files = 0
+        FileContext.total_lines = 0
+        FileContext.total_words = 0
+        FileContext.total_chars = 0
+
+    def _apply_content_modifier(self, template: str, pattern: str, func, delete_line: bool = False) -> str:
+        """
+        Применяет модификатор содержимого к текущему файлу и удаляет плейсхолдер из шаблона.
+
+        :param template: Шаблон текста, где ищем плейсхолдер.
+        :param pattern: Имя плейсхолдера, например "upper", "lower", "remove_whitespaces".
+        :param func: Функция, принимающая self (FileContext) и аргументы, возвращающая новое содержимое.
+                     Результат func автоматически присваивается self.content.
+        :param delete_line: Если True, удаляется вся строка с плейсхолдером, вместо простой замены.
+
+        :return: Новый шаблон с удалённым плейсхолдером.
+        """
+
+        if delete_line:
+            # Удаляем всю строку с плейсхолдером
+            regex_line = r".*{" + pattern + r"(?:\:[^}]*)?}.*\n?"
+            return re.sub(regex_line, "", template)
+        else:
+            # Ищем плейсхолдеры вида {pattern} или {pattern:arg1;arg2}
+            regex = r"{(" + pattern + r")(?:\:([^}]+))?}"
+
+            def repl(match: re.Match) -> str:
+                # Разбираем аргументы плейсхолдера
+                args = match.group(2).split(";") if match.group(2) else []
+                # Применяем функцию к self и сохраняем результат в self.content
+                self.content = func(self, *args)
+                # Плейсхолдер удаляется из шаблона
+                return ""
+
+            return re.sub(regex, repl, template)
+
+
+    @staticmethod
+    def find_placeholders(template: str) -> list[dict[str, Any]]:
+        """
+        Находит все плейсхолдеры в шаблоне.
+
+        Возвращает список словарей вида:
+        {
+            "full": "{pattern:arg1;arg2}",  # Полная строка плейсхолдера
+            "pattern": "pattern",           # Имя плейсхолдера
+            "args": ["arg1", "arg2"]        # Список аргументов (может быть пустым)
+        }
+        """
+
+        regex = r"{([a-zA-Z0-9_]+)(?:\:([^}]+))?}"
+        placeholders = []
+        for match in re.finditer(regex, template):
+            pattern = match.group(1)
+            args = match.group(2).split(";") if match.group(2) else []
+            placeholders.append({
+                "full": match.group(0),
+                "pattern": pattern,
+                "args": args
+            })
+
+        return placeholders
+
+    @staticmethod
+    def _apply_placeholder(template: str, pattern: str, func, delete_line: bool = False) -> str:
+        """
+        Подставляет результат работы func() вместо плейсхолдера {pattern} в шаблоне.
+        Если delete_line=True, удаляет строку с плейсхолдером.
+
+        :param template: Текст шаблона.
+        :param pattern: Имя плейсхолдера.
+        :param func: Функция, возвращающая значение для подстановки.
+        :param delete_line: Флаг удаления строки.
+
+        :return: Новый текст шаблона.
+        """
+
+        if delete_line:
+            # Ищем строки с плейсхолдером целиком и удаляем их
+            regex_line = r".*{" + pattern + r"(?:\:[^}]*)?}.*\n?"
+            return re.sub(regex_line, "", template)
+        else:
+            regex = r"{(" + pattern + r")(?:\:([^}]+))?}"
+
+            def repl(match: re.Match) -> str:
+                args = match.group(2).split(";") if match.group(2) else []
+                return str(func(*args))
+
+            return re.sub(regex, repl, template)
 
     def format(self, template: str) -> str:
-        """ Возвращает строку: шаблон с подставленными полями и спец. секциями. """
+        """ Возвращает строку: шаблон с подставленными полями. """
 
-        if "{skip_empty}" in template and self.chars == 0:
+        if getattr(self, "skip_file", False):
             return ""
-        if "{skip_nontext}" in template and not self.content.strip():
-            return ""
-
-        handle_mapping: Dict[str, Any] = {
-            "name": self.name,
-            "extension": self.extension,
-            "filename": self.filename,
-            "path": self.path,
-            "folder": os.path.basename(self.folder),
-            "drive": self.drive,
-            "size": self._human_size(self.size),
-            "created": self.created,
-            "modified": self.modified,
-            "accessed": self.accessed,
-            "content": self.content,
-            "lines": self.lines,
-            "words": self.words,
-            "chars": self.chars,
-            "firstline": self.firstline,
-            "lastline": self.lastline,
-            "counter": self.counter,
-            "total_files": FileContext.total_files,
-            "total_lines": FileContext.total_lines,
-            "total_words": FileContext.total_words,
-            "grand_total_files": FileContext.grand_total_files,
-            "grand_total_lines": FileContext.grand_total_lines,
-            "grand_total_words": FileContext.grand_total_words,
-            "space": " ",
-            "hash:md5": self.hash_md5,
-            "hash:sha1": self.hash_sha1,
-        }
-
-        cleanup_patterns = [
-            r"{skip_empty}",
-            r"{skip_nontext}",
-            r"{skip_ext:[^}]+}",
-            r"{allow_ext:[^}]+}",
-            r"{trim_spaces}",
-            r"{remove_blank_lines}",
-            r"{remove_linebreaks}",
-            r"{upper}",
-            r"{lower}",
-            r"{title}",
-        ]
-
-        # ----- Простая подстановка полей вида {name} -----
 
         result = template
-        for key, value in handle_mapping.items():
-            result = result.replace("{" + key + "}", str(value))
 
-        # Поддержка форматирования дат: {created:%Y-%m-%d}
-        def repl_date(match):
-            field, fmt = match.group(1), match.group(2)
-            dt = handle_mapping.get(field)
-            if isinstance(dt, datetime):
-                return dt.strftime(fmt)
-            return ""
+        # --- Информация о файле ---
 
-        result = re.sub(r"{(created|modified|accessed):([^}]+)}", repl_date, result)
+        result = self._apply_placeholder(result, "name", lambda *args: os.path.splitext(os.path.basename(self.path))[0])
+        result = self._apply_placeholder(result, "extension", lambda *args: os.path.splitext(os.path.basename(self.path))[1].lstrip("."))
+        result = self._apply_placeholder(result, "filename", lambda *args: os.path.basename(self.path))
+        result = self._apply_placeholder(result, "path", lambda *args: os.path.normpath(self.path).replace("/", "\\"))
+        result = self._apply_placeholder(result, "folder", lambda *args: os.path.normpath(os.path.dirname(self.path)).replace("/", "\\"))
+        result = self._apply_placeholder(result, "drive", lambda *args: os.path.splitdrive(self.path)[0])
+        result = self._apply_placeholder(result, "size", lambda *args: self._human_size(os.path.getsize(self.path)))
+        result = self._apply_placeholder(result, "hash:md5", lambda *args: hashlib.md5(open(self.path, "rb").read()).hexdigest())
+        result = self._apply_placeholder(result, "hash:sha1", lambda *args: hashlib.sha1(open(self.path, "rb").read()).hexdigest())
+        result = self._apply_placeholder(result, "created", lambda fmt="%Y-%m-%d %H:%M:%S": datetime.fromtimestamp(os.stat(self.path).st_ctime).strftime(fmt))
+        result = self._apply_placeholder(result, "modified", lambda fmt="%Y-%m-%d %H:%M:%S": datetime.fromtimestamp(os.stat(self.path).st_mtime).strftime(fmt))
+        result = self._apply_placeholder(result, "accessed", lambda fmt="%Y-%m-%d %H:%M:%S": datetime.fromtimestamp(os.stat(self.path).st_atime).strftime(fmt))
 
-        # Спец. плейсхолдеры с параметрами
-        for match in re.findall(r"{line:(\d+)}", result):
-            n = int(match) - 1
-            text = self.lines_list[n] if 0 <= n < self.lines else ""
-            result = result.replace(f"{{line:{match}}}", text)
+        # --- Символы ---
 
-        # {content:numbered} — содержимое с нумерацией строк
-        if "{content:numbered}" in result:
-            numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(self.lines_list)]
-            result = result.replace("{content:numbered}", "\n".join(numbered_lines))
+        result = self._apply_placeholder(result, '_', lambda *args: " ")
+        result = self._apply_placeholder(result, 'nl', lambda *args: "\n")
 
-        # {head:N} — первые N строк файла, объединённые переводами строк
-        for match in re.findall(r"{head:(\d+)}", result):
-            n = int(match)
-            text = "\n".join(self.lines_list[:n])
-            result = result.replace(f"{{head:{match}}}", text)
+        result = self._apply_placeholder(result, 'x', lambda *args: "", delete_line=True)
 
-        # {tail:N} — последние N строк файла, объединённые переводами строк
-        for match in re.findall(r"{tail:(\d+)}", result):
-            n = int(match)
-            text = "\n".join(self.lines_list[-n:])
-            result = result.replace(f"{{tail:{match}}}", text)
+        # --- Трансформация текста (модификаторы содержимого) ---
 
-        # {preview:N} — первые N символов содержимого
-        for match in re.findall(r"{preview:(\d+)}", result):
-            n = int(match)
-            text = self.content[:n]
-            result = result.replace(f"{{preview:{match}}}", text)
+        result = self._apply_content_modifier(result, "upper", lambda ctx: ctx.content.upper())
+        result = self._apply_content_modifier(result, "lower", lambda ctx: ctx.content.lower())
+        result = self._apply_content_modifier(result, "title", lambda ctx: ctx.content.title())
+        result = self._apply_content_modifier(result, "remove_linebreaks", lambda ctx: ctx.content.replace("\n", ""))
+        result = self._apply_content_modifier(result, "remove_blank_lines", lambda ctx: "\n".join(line for line in ctx.content.splitlines() if line.strip()))
+        result = self._apply_content_modifier(result, "remove_whitespaces", lambda ctx: " ".join(ctx.content.split()))
+        result = self._apply_content_modifier(result, "remove_spaces", lambda ctx: ctx.content.replace(" ", ""))
 
-        # {tailpreview:N} — последние N символов содержимого
-        for match in re.findall(r"{tailpreview:(\d+)}", result):
-            n = int(match)
-            text = self.content[-n:]
-            result = result.replace(f"{{tailpreview:{match}}}", text)
+        # --- Содержимое ---
 
-        # ----- Фильтры по расширениям -----
+        result = self._apply_placeholder(result, "content:numbered", lambda *args: "\n".join(f"{i + 1}: {line}" for i, line in enumerate(self.lines)))
+        result = self._apply_placeholder(result, "content", lambda *args: self.content)
 
-        # {skip_ext:xxx} — пропустить файл с расширением
-        for match in re.findall(r"{skip_ext:([^}]+)}", template):
-            if self.extension.lower() == match.lower():
-                return ""  # пропускаем файл
-            template = template.replace(f"{{skip_ext:{match}}}", "")
+        result = self._apply_placeholder(result, "line", lambda n: self.lines[int(n) - 1] if n and n.isdigit() and 0 < int(n) <= len(self.lines) else "")
+        result = self._apply_placeholder(result, "lines", lambda start=None, end=None, *args: ("\n".join(self.lines[int(start) - 1:int(end)]) if start and end and start.isdigit() and end.isdigit() else ""))
+        result = self._apply_placeholder(result, "head", lambda n: "\n".join(self.lines[:int(n)]) if n and n.isdigit() else "")
+        result = self._apply_placeholder(result, "tail", lambda n: "\n".join(self.lines[-int(n):]) if n and n.isdigit() else "")
 
-        # {allow_ext:xxx} — оставить файл только с расширениями, накопительный эффект
-        allow_ext_matches = re.findall(r"{allow_ext:([^}]+)}", template)
-        if allow_ext_matches:
-            allowed = [m.lower() for m in allow_ext_matches]
-            if self.extension.lower() not in allowed:
-                return ""  # расширение файла не в списке — пропускаем
+        result = self._apply_placeholder(result, "char", lambda n: self.content[int(n) - 1] if n and n.isdigit() and 0 < int(n) <= len(self.content) else "")
+        result = self._apply_placeholder(result, "chars", lambda start=None, end=None, *args: (self.content[int(start) - 1:int(end)] if start and end and start.isdigit() and end.isdigit()  else ""))
+        result = self._apply_placeholder(result, "headchars", lambda n: self.content[:int(n)] if n and n.isdigit() else "")
+        result = self._apply_placeholder(result, "tailchars", lambda n: self.content[-int(n):] if n and n.isdigit() else "")
 
-        # ----- Очистка и текстовые трансформации
+        # --- Статистика содержимого ---
 
-        if "{trim_spaces}" in result:
-            lines = result.splitlines()
-            # Схлопываем только повторы пробелов/табов (2 и более), не трогаем одиночные и не обрезаем края
-            lines = [re.sub(r"[ \t]{2,}", " ", line) for line in lines]
-            result = "\n".join(lines)
+        result = self._apply_placeholder(result, "lines_count", lambda *args: self.lines_count)
+        result = self._apply_placeholder(result, "words_count", lambda *args: self.words_count)
+        result = self._apply_placeholder(result, "chars_count", lambda *args: self.chars_count)
 
-        if "{remove_blank_lines}" in result:
-            lines = [line for line in result.splitlines() if line.strip()]
-            result = "\n".join(lines)
+        result = self._apply_placeholder(result, "counter", lambda *args: self.files_counter)
+        result = self._apply_placeholder(result, "current_files_count", lambda *args: self.current_files_count)
+        result = self._apply_placeholder(result, "current_lines_count", lambda *args: self.current_lines_count)
+        result = self._apply_placeholder(result, "current_words_count", lambda *args: self.current_words_count)
+        result = self._apply_placeholder(result, "current_chars_count", lambda *args: self.current_chars_count)
 
-        if re.search(r"{remove_linebreaks}", result):
-            result = re.sub(r"{remove_linebreaks}", "", result)
-            result = re.sub(r"\r?\n+", " ", result)
-
-        if "{upper}" in result:
-            result = result.upper()
-
-        if "{lower}" in result:
-            result = result.lower()
-
-        if "{title}" in result:
-            result = result.title()
-
-        # -----
-
-        # Всегда добавляем пустую строку для {blank_line}
-        result = re.sub(r"{blank_line}", "\n", result)
-
-        # -----
-
-        for pattern in cleanup_patterns:
-            result = re.sub(pattern, "", result, flags=re.IGNORECASE)
-
-        result = re.sub(r".*\{x}.*\n?", "", result, flags=re.IGNORECASE)
+        result = self._apply_placeholder(result, "total_files_count", lambda *args: self.total_files)
+        result = self._apply_placeholder(result, "total_lines_count", lambda *args: self.total_lines)
+        result = self._apply_placeholder(result, "total_words_count", lambda *args: self.total_words)
+        result = self._apply_placeholder(result, "total_chars_count", lambda *args: self.total_chars)
 
         return result
 
     @staticmethod
     def _human_size(size: int) -> str:
-        """ Форматирует размер файла в удобочитаемый вид с единицами измерения. """
-
-        for unit in ["Б", "КБ", "МБ", "ГБ"]:
+        for unit in ["Б", "КБ", "МБ", "ГБ", "ТБ"]:
             if size < 1024:
-                return f"{size:.2f} {unit}"
+                if unit == "Б":
+                    return f"{size} {unit}"
+                else:
+                    return f"{size:.2f} {unit}"
             size /= 1024
-        return f"{size:.2f} ТБ"
-
-    def _calc_hash(self, algo: str) -> str:
-        """ Возвращает хэш файла по алгоритму md5 или sha1ю """
-
-        h = hashlib.md5() if algo.lower() == "md5" else hashlib.sha1()
-        try:
-            with open(self.path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    h.update(chunk)
-            return h.hexdigest()
-        except Exception:
-            return ""
-
 
 class FGlueApp:
-    """
-    Главное GUI‑приложение на tkinter.
-
-    Отвечает за:
-    - отображение дерева файлов
-    - загрузку/выбор шаблонов
-    - выбор файлов (псевдочекбоксы), массовые операции
-    - исключение расширений
-    - предпросмотр и сохранение результата
-    """
+    """ Главный класс GUI‑приложения на tkinter. """
 
     def __init__(self, root: tk.Tk, folder_path: str) -> None:
         """ Создаёт окно, инициализирует состояние и наполняет UI. """
@@ -297,6 +281,7 @@ class FGlueApp:
         self._load_files(self.folder_path)
         self._load_templates()
         self._update_status()
+
         # Центрируем главное окно после построения интерфейса
         self.root.update_idletasks()
         self._center_window(self.root)
@@ -675,53 +660,33 @@ class FGlueApp:
 
         if not os.listdir(templates_dir):
             with open(os.path.join(templates_dir, "1. Содержимой с шапкой.txt"), "w", encoding="utf-8") as f:
-                f.write("----- {filename} -----{blank_line}{content}{blank_line}")
+                f.write("----- {filename} -----{nl}{content}{nl}")
             with open(os.path.join(templates_dir, "2. Cодержимое с шапкой и нумерацией.txt"), "w", encoding="utf-8") as f:
-                f.write("----- {counter}. {filename} -----{blank_line}{content:numbered}{blank_line}")
+                f.write("----- {counter}. {filename} -----{nl}{content:numbered}{nl}")
             with open(os.path.join(templates_dir, "3. Только содержимое.txt"), "w", encoding="utf-8") as f:
-                f.write("{content}{blank_line}")
+                f.write("{content}{nl}")
             with open(os.path.join(templates_dir, "4. Cодержимое в одну строку.txt"), "w", encoding="utf-8") as f:
-                f.write("{trim_spaces}{remove_linebreaks}{content}{space}")
+                f.write("{remove_whitespaces}{remove_linebreaks}{content}{_}")
             with open(os.path.join(templates_dir, "5. Объединение программного кода.txt"), "w", encoding="utf-8") as f:
                 f.write(
-                    "{allow_ext:py}{x}\n"
-                    "{allow_ext:js}{x}\n"
-                    "{allow_ext:ts}{x}\n"
-                    "{allow_ext:php}{x}\n"
-                    "{allow_ext:html}{x}\n"
-                    "{allow_ext:css}{x}\n"
-                    "{allow_ext:java}{x}\n"
-                    "{allow_ext:cpp}{x}\n"
-                    "{allow_ext:c}{x}\n"
-                    "{allow_ext:cs}{x}\n"
-                    "{allow_ext:rb}{x}\n"
-                    "{allow_ext:go}{x}\n"
-                    "{allow_ext:rs}{x}\n"
-                    "{allow_ext:swift}{x}\n"
-                    "{allow_ext:kt}{x}\n"
-                    "{allow_ext:sql}{x}\n"
-                    "{x}\n"
-                    "{allow_ext:json}{x}\n"
-                    "{allow_ext:xml}{x}\n"
-                    "{x}\n"
+                    "{allow_ext:py;js;ts;php;html;css;java;cpp;c;cs;rb;go;rs;swift;kt}{x}\n"
+                    "{allow_ext:sql;json;xml}{x}\n"
                     "{allow_ext:md}{x}\n"
-                    "{x}\n"
                     "----- {filename} ({path}) -----\n"
-                    "{remove_blank_lines}{content}{blank_line}{blank_line}"
+                    "{remove_blank_lines}{content}{nl}{nl}"
                 )
             with open(os.path.join(templates_dir, "6. Информация о файлах.txt"), "w", encoding="utf-8") as f:
                 f.write(
-                    "{show_before}Информация о файлах:\n"
                     "{show_before}----------------------------------\n"
-                    "{show_before}Всего файлов: {grand_total_files}\n"
-                    "{show_before}Всего строк: {grand_total_lines}\n"
-                    "{show_before}Всего слов: {grand_total_words}\n"
+                    "{show_before}Всего файлов: {total_files_count}\n"
+                    "{show_before}Всего строк: {total_lines_count}\n"
+                    "{show_before}Всего слов: {total_words_count}\n"
                     "{show_before}----------------------------------\n"
                     "{counter}. Файл: {filename}\n"
                     "    Расширение: {extension}\n"
                     "    Путь: {path}\n"
                     "    Размер: {size}\n"
-                    "    Строк: {lines}, Слов: {words}, Символов: {chars}\n"
+                    "    Строк: {lines_count}, Слов: {words_count}, Символов: {chars_count}\n"
                     "    Дата создания: {created:%d.%m.%Y %H:%M:%S}\n"
                     "    Дата изменения: {modified:%d.%m.%Y %H:%M:%S}\n"
                     "    Последний доступ: {accessed:%d.%m.%Y %H:%M:%S}\n"
@@ -730,6 +695,8 @@ class FGlueApp:
                     "\n"
                     "{show_after}----------------------------------\n"
                 )
+            with open(os.path.join(templates_dir, "7. Список файлов.txt"), "w", encoding="utf-8") as f:
+                f.write("{counter}. {path}{nl}")
 
         # Загружаем файлы шаблонов: ключ — имя без расширения
         self.templates.clear()
@@ -768,55 +735,77 @@ class FGlueApp:
     def merge_files(self) -> None:
         """ Формирует объединённый текст по текущему шаблону и выбранным файлам. """
 
-        FileContext.counter_global = 0
-        FileContext.total_files = 0
-        FileContext.total_lines = 0
-        FileContext.total_words = 0
-        FileContext.grand_total_files = 0
-        FileContext.grand_total_lines = 0
-        FileContext.grand_total_words = 0
-        
+        FileContext.reset_counters()
+
         template_name = self.selected_template.get()
         if not template_name:
             messagebox.showwarning("Внимание", "Выберите шаблон!")
             return
 
         template = self.templates[template_name]
-
-        # {limit_files:N} — ограничить кол-во файлов для объединения
-        limit = None
-        for match in re.findall(r"{limit_files:(\d+)}", template):
-            try:
-                limit = int(match)
-            except Exception:
-                limit = None
-        if limit is not None and limit < 0:
-            limit = 0
-
-        # Уберём плейсхолдер из шаблона, чтобы он не попал в результат
-        template = re.sub(r"{limit_files:\d+}", "", template)
-        result = ""
-
         selected_files = self.get_selected_files()
-        if limit is not None:
-            selected_files = selected_files[:limit]
+        placeholders = FileContext.find_placeholders(template)
 
-        # Подсчитаем итоговые значения по всем выбранным файлам заранее
-        FileContext.grand_total_files = len(selected_files)
+        # --- {skip_ext:ext1;ext2;...} ---
+
+        skip_exts = []
+        for p in [p for p in placeholders if p["pattern"] == "skip_ext"]:
+            for arg in p["args"]:
+                if arg.strip():
+                    skip_exts.append(arg.lower())
+        if skip_exts:
+            skip_exts_set = set(ext if ext.startswith(".") else "." + ext for ext in skip_exts)
+            selected_files = [f for f in selected_files if os.path.splitext(f)[1].lower() not in skip_exts_set]
+            for ph in [p for p in placeholders if p["pattern"] == "skip_ext"]:
+                template = template.replace(ph["full"], "")
+
+        # --- {allow_ext:ext1;ext2;...} ---
+
+        allow_exts = []
+        for p in [p for p in placeholders if p["pattern"] == "allow_ext"]:
+            for arg in p["args"]:
+                if arg.strip():
+                    allow_exts.append(arg.lower())
+        if allow_exts:
+            allow_exts_set = set(ext if ext.startswith(".") else "." + ext for ext in allow_exts)
+            selected_files = [f for f in selected_files if os.path.splitext(f)[1].lower() in allow_exts_set]
+            for ph in [p for p in placeholders if p["pattern"] == "allow_ext"]:
+                template = template.replace(ph["full"], "")
+
+        # --- {limit_files:n} ---
+
+        limit_ph = next((p for p in placeholders if p["pattern"] == "limit_files"), None)
+        if limit_ph and limit_ph["args"]:
+            limit = int(limit_ph["args"][0])
+            selected_files = selected_files[:limit]
+            template = template.replace(limit_ph["full"], "")
+
+        # --- Подсчитаем итоговые значения по всем выбранным файлам ---
+
+        FileContext.total_files = len(selected_files)
+
         total_lines_sum = 0
         total_words_sum = 0
+        total_chars_sum = 0
+
         for p in selected_files:
             try:
                 with open(p, "r", encoding="utf-8") as f:
                     content_tmp = f.read()
             except Exception:
                 content_tmp = ""
+
             total_lines_sum += len(content_tmp.splitlines())
             total_words_sum += len(content_tmp.split())
-        FileContext.grand_total_lines = total_lines_sum
-        FileContext.grand_total_words = total_words_sum
+            total_chars_sum += len(content_tmp)
+
+        FileContext.total_lines = total_lines_sum
+        FileContext.total_words = total_words_sum
+        FileContext.total_chars = total_chars_sum
 
         # ----- Объединение файлов -----
+
+        result = ""
 
         for i, path in enumerate(selected_files):
             ctx = FileContext(path)
@@ -824,16 +813,16 @@ class FGlueApp:
 
             if i == 0:
                 # Первый файл: убираем show_after
-                temp_template = re.sub(r".*\{show_after\}.*\n?", "", temp_template)
-                temp_template = re.sub(r"{show_before}", "", temp_template)
+                temp_template = re.sub(r".*\{show_after}.*\n?", "", temp_template, flags=re.IGNORECASE)
+                temp_template = re.sub(r"{show_before}", "", temp_template, flags=re.IGNORECASE)
             elif i == len(selected_files) - 1:
                 # Последний файл: убираем show_before
-                temp_template = re.sub(r"{show_after}", "", temp_template)
-                temp_template = re.sub(r".*\{show_before\}.*\n?", "", temp_template)
+                temp_template = re.sub(r"{show_after}", "", temp_template, flags=re.IGNORECASE)
+                temp_template = re.sub(r".*\{show_before}.*\n?", "", temp_template, flags=re.IGNORECASE)
             else:
                 # "Средние" файлы: убираем и show_before, и show_after
-                temp_template = re.sub(r".*\{show_before\}.*\n?", "", temp_template)
-                temp_template = re.sub(r".*\{show_after\}.*\n?", "", temp_template)
+                temp_template = re.sub(r".*\{show_before}.*\n?", "", temp_template, flags=re.IGNORECASE)
+                temp_template = re.sub(r".*\{show_after}.*\n?", "", temp_template, flags=re.IGNORECASE)
 
             result += ctx.format(temp_template)
 
