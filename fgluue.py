@@ -1,5 +1,5 @@
 """
-FGlue v2.0: простое GUI-приложение для объединения файлов по шаблонам.
+FGlue v2.1: простое GUI-приложение для объединения файлов по шаблонам.
 by @iskairov
 """
 
@@ -341,6 +341,13 @@ class FGlueApp:
         ttk.Button(btn_frame, text="Выбрать все", command=lambda: self._set_all(True)).pack(side="left")
         ttk.Button(btn_frame, text="Снять все", command=lambda: self._set_all(False)).pack(side="left", padx=5)
 
+        # Блок управления деревом
+        tree_btn_frame = ttk.Frame(frame)
+        tree_btn_frame.pack(fill="x", pady=(5, 10))
+
+        ttk.Button(tree_btn_frame, text="Раскрыть все", command=self.expand_all).pack(side="left", padx=(0, 5))
+        ttk.Button(tree_btn_frame, text="Свернуть все", command=self.collapse_all).pack(side="left", padx=(0, 5))
+
         # Строка статуса
         status = ttk.Label(frame, textvariable=self.status_var, anchor="w")
         status.pack(fill="x", pady=(4, 0))
@@ -530,6 +537,28 @@ class FGlueApp:
                 # Теги не меняем здесь — ими управляет apply/reset
                 self._refresh_item_label(item_id, path)
         self._update_status()
+
+    def expand_all(self) -> None:
+        """ Рекурсивно раскрывает все узлы дерева. """
+
+        def recurse(node: str):
+            self.tree.item(node, open=True)
+            for child in self.tree.get_children(node):
+                recurse(child)
+
+        for top_node in self.tree.get_children(""):
+            recurse(top_node)
+
+    def collapse_all(self) -> None:
+        """ Рекурсивно сворачивает все узлы дерева. """
+
+        def recurse(node: str):
+            self.tree.item(node, open=False)
+            for child in self.tree.get_children(node):
+                recurse(child)
+
+        for top_node in self.tree.get_children(""):
+            recurse(top_node)
 
     def _on_select_all(self) -> None:
         """ Ctrl+A: выбрать все. """
